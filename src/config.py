@@ -9,12 +9,16 @@ model_dir = "models"
 # set universal random state
 seed = 15
 
+# set the data mode: balanced or unbalanced
+data_mode = "balanced"
+balance_classes = True
+
 # fraction of whole data to be used as validation and test data
 fraction_validate = 0.2
 fraction_test = 0.1
 
 # batch size
-batch_size = 48
+batch_size = 64
 num_workers = 4
 
 # maximum number of ELM events to analyze

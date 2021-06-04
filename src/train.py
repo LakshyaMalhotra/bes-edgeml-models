@@ -1,19 +1,51 @@
 import os
 import time
+import pickle
 from typing import Union
 
 import torch
 import torch.nn as nn
 import numpy as np
+import pandas as pd
 from sklearn.metrics import roc_auc_score
 
 import config, data, utils, run, cnn_feature_model
 
 
-LOGGER = utils.get_logger(script_name=__name__, log_file="output_logs.log")
+LOGGER = utils.get_logger(
+    script_name=__name__, log_file=f"output_logs_{config.data_mode}.log"
+)
 
 
-def train_loop(data_obj: data.Data, fold: Union[int, None], desc: bool = True):
+def train_loop(
+    data_obj: data.Data,
+    test_datafile_name: str,
+    kfold: bool = False,
+    fold: Union[int, None] = None,
+    desc: bool = True,
+):
+    # TODO: Implement K-fold cross-validation
+    if kfold and (fold is None):
+        raise Exception(
+            f"K-fold cross validation is passed but fold index in range [0, {config.folds}) is not specified."
+        )
+    if (not kfold) and (fold is not None):
+        LOGGER.info(
+            f"K-fold is set to {kfold} but fold index is passed!"
+            " Proceeding without using K-fold."
+        )
+        fold = None
+
+    # test data file path
+    test_data_file = os.path.join(config.data_dir, test_datafile_name)
+
+    LOGGER.info("-" * 60)
+    if config.balance_classes:
+        LOGGER.info("Training with balanced classes.")
+    else:
+        LOGGER.info("Training using unbalanced (original) classes.")
+
+    LOGGER.info(f"Test data will be saved to: {test_data_file}")
     LOGGER.info("-" * 30)
     LOGGER.info(f"       Training fold: {fold}       ")
     LOGGER.info("-" * 30)
@@ -24,9 +56,21 @@ def train_loop(data_obj: data.Data, fold: Union[int, None], desc: bool = True):
             desc = False
 
     # create train, valid and test data
-    train_data, valid_data, _ = data_obj.get_data(
+    train_data, valid_data, test_data = data_obj.get_data(
         shuffle_sample_indices=True, fold=fold
     )
+
+    # dump test data into to a file
+    with open(test_data_file, "wb") as f:
+        pickle.dump(
+            {
+                "signals": test_data[0],
+                "labels": test_data[1],
+                "sample_indices": test_data[2],
+                "window_start": test_data[3],
+            },
+            f,
+        )
 
     # create datasets
     train_dataset = data.ELMDataset(
@@ -82,7 +126,12 @@ def train_loop(data_obj: data.Data, fold: Union[int, None], desc: bool = True):
     )
 
     # loss function
-    criterion = nn.BCEWithLogitsLoss()
+    if config.balance_classes:
+        criterion = nn.BCEWithLogitsLoss()
+    else:
+        criterion = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([13], device=device)
+        )
 
     # define variables for ROC and loss
     best_score = 0
@@ -119,6 +168,11 @@ def train_loop(data_obj: data.Data, fold: Union[int, None], desc: bool = True):
             f"Epoch: {epoch +1}, \tROC-AUC score: {roc_score:.4f}, \ttime elapsed: {elapsed}"
         )
 
+        # save the model if best ROC is found
+        model_save_path = os.path.join(
+            config.model_dir,
+            f"{config.model_name}_fold{fold}_best_roc_{config.data_mode}.pth",
+        )
         if roc_score > best_score:
             best_score = roc_score
             LOGGER.info(
@@ -126,10 +180,7 @@ def train_loop(data_obj: data.Data, fold: Union[int, None], desc: bool = True):
             )
             torch.save(
                 {"model": model.state_dict(), "preds": preds},
-                os.path.join(
-                    config.model_dir,
-                    f"{config.model_name}_fold{fold}_best_roc.pth",
-                ),
+                model_save_path,
             )
 
         if avg_val_loss < best_loss:
@@ -137,24 +188,18 @@ def train_loop(data_obj: data.Data, fold: Union[int, None], desc: bool = True):
             LOGGER.info(
                 f"Epoch: {epoch+1}, \tSave Best Loss: {best_loss:.4f} Model"
             )
-            # torch.save(
-            #     {"model": model.state_dict(), "preds": preds},
-            #     os.path.join(
-            #         config.model_dir,
-            #         f"{config.model_name}_fold{fold}_best_loss.pth",
-            #     ),
-            # )
-    # # save the predictions in the valid dataframe
-    # valid_folds["preds"] = torch.load(
-    #     os.path.join(
-    #         config.model_dir, f"{config.model_name}_fold{fold}_best_roc.pth"
-    #     ),
-    #     map_location=torch.device("cpu"),
-    # )["preds"]
+        LOGGER.info(f"Model saved to: {model_save_path}")
+    # # # save the predictions in the valid dataframe
+    # # valid_folds["preds"] = torch.load(
+    # #     os.path.join(
+    # #         config.model_dir, f"{config.model_name}_fold{fold}_best_roc.pth"
+    # #     ),
+    # #     map_location=torch.device("cpu"),
+    # # )["preds"]
 
-    # return valid_folds
+    # # return valid_folds
 
 
 if __name__ == "__main__":
-    data_obj = data.Data(kfold=False)
-    train_loop(data_obj, fold=None)
+    data_obj = data.Data(kfold=False, balance_classes=config.balance_classes)
+    train_loop(data_obj, test_datafile_name=f"test_data_{config.data_mode}.pkl")
