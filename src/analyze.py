@@ -1,19 +1,25 @@
 import os
 import pickle
-
+from typing import Tuple
 import torch
-import matplotlib
 
-matplotlib.use("TkAgg")
+# import matplotlib
+
+# matplotlib.use("TkAgg")
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_auc_score
+import seaborn as sns
+from sklearn import metrics
 from tqdm import tqdm
 
-import utils, config, data, cnn_feature_model
+import config, data, cnn_feature_model
+
+sns.set_style("white")
+sns.set_palette("deep")
 
 
-def get_test_dataset(file_name: str):
+def get_test_dataset(file_name: str) -> Tuple[tuple, data.ELMDataset]:
     file_path = os.path.join(config.data_dir, file_name)
 
     with open(file_path, "rb") as f:
@@ -33,7 +39,11 @@ def get_test_dataset(file_name: str):
     return data_attrs, test_dataset
 
 
-def plot(test_data, model, device):
+def plot(
+    test_data: tuple,
+    model: cnn_feature_model.FeatureModel,
+    device: torch.device,
+) -> None:
     signals = test_data[0]
     labels = test_data[1]
     sample_indices = test_data[2]
@@ -41,7 +51,7 @@ def plot(test_data, model, device):
     num_elms = len(window_start)
     i_elms = np.random.choice(num_elms, 12, replace=False)
 
-    plt.figure(figsize=(18, 8))
+    fig = plt.figure(figsize=(18, 8))
     for i, i_elm in enumerate(i_elms):
         i_start = window_start[i_elm]
         if i_elm < num_elms - 1:
@@ -75,7 +85,13 @@ def plot(test_data, model, device):
         plt.subplot(3, 4, i + 1)
         elm_time = np.arange(elm_labels.size)
         plt.plot(elm_time, elm_signals[:, 2, 6], label="BES ch. 22")
-        plt.plot(elm_time, elm_labels + 0.02, label="Ground truth", ls="-.")
+        plt.plot(
+            elm_time,
+            elm_labels + 0.02,
+            label="Ground truth",
+            ls="-.",
+            lw=2.5,
+        )
         plt.plot(
             elm_time[
                 (config.signal_window_size + config.label_look_ahead - 1) :
@@ -83,17 +99,24 @@ def plot(test_data, model, device):
             predictions,
             label="Prediction",
             ls="-.",
+            lw=2.5,
         )
         plt.xlabel("Time (micro-s)")
         plt.ylabel("Signal | label")
         plt.ylim([None, 1.1])
-        plt.legend(fontsize=14)
+        plt.legend(fontsize=9, frameon=False)
         plt.suptitle(f"Model output on {config.data_mode} classes", fontsize=20)
     plt.tight_layout()
+    fig.savefig(
+        os.path.join(
+            config.output_dir, f"{config.data_mode}_classes_output.png"
+        ),
+        dpi=200,
+    )
     plt.show()
 
 
-def show_details(test_data):
+def show_details(test_data: tuple) -> None:
     print("Test data information")
     signals = test_data[0]
     labels = test_data[1]
@@ -105,7 +128,37 @@ def show_details(test_data):
     print(f"Window start indices: {window_start}")
 
 
-def model_predict(model, device, data_loader):
+def show_metrics(
+    y_true: np.ndarray, y_pred: np.ndarray, threshold: float = 0.5
+):
+    preds = (y_pred > threshold).astype(int)
+    cm = metrics.confusion_matrix(y_true, preds)
+    cr = metrics.classification_report(y_true, preds, output_dict=True)
+    df = pd.DataFrame(cr).transpose()
+    df.to_csv(
+        os.path.join(
+            config.output_dir, f"classification_report_{config.data_mode}.csv"
+        ),
+        index=False,
+    )
+    print(f"Classification report:\n{df}")
+    cm_disp = metrics.ConfusionMatrixDisplay(cm, display_labels=[0, 1])
+    cm_disp.plot()
+    fig = cm_disp.figure_
+    fig.savefig(
+        os.path.join(
+            config.output_dir, f"confusion_matrix_{config.data_mode}.png"
+        ),
+        dpi=200,
+    )
+    plt.show()
+
+
+def model_predict(
+    model: cnn_feature_model.FeatureModel,
+    device: torch.device,
+    data_loader: torch.utils.data.DataLoader,
+) -> Tuple[np.ndarray, np.ndarray]:
     # put the model to eval mode
     model.eval()
     predictions = []
@@ -121,10 +174,16 @@ def model_predict(model, device, data_loader):
     predictions = np.concatenate(predictions)
     targets = np.concatenate(targets)
     print(predictions[:10], targets[:10])
-    print(roc_auc_score(targets, predictions))
+    print(metrics.roc_auc_score(targets, predictions))
+    return targets, predictions
 
 
-def main(fold=None, show_info=True, plot_data=False):
+def main(
+    fold: None = None,
+    show_info: bool = True,
+    plot_data: bool = False,
+    display_metrics: bool = False,
+) -> None:
     # instantiate the model and load the checkpoint
     model = cnn_feature_model.FeatureModel()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -155,11 +214,14 @@ def main(fold=None, show_info=True, plot_data=False):
     if show_info:
         show_details(test_data)
 
-    model_predict(model, device, test_loader)
+    targets, predictions = model_predict(model, device, test_loader)
 
     if plot_data:
         plot(test_data, model, device)
 
+    if display_metrics:
+        show_metrics(targets, predictions)
+
 
 if __name__ == "__main__":
-    main(plot_data=True)
+    main(plot_data=True, display_metrics=True)
