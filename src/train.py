@@ -17,6 +17,56 @@ LOGGER = utils.get_logger(
 )
 
 
+def get_lr_scheduler(optimizer, scheduler_name, dataloader):
+    # learning rate scheduler
+    if scheduler_name == "ReduceLROnPlateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=2,
+            verbose=True,
+            eps=1e-6,
+        )
+    elif scheduler_name == "CosineAnnealingLR":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=10, eta_min=0, verbose=False
+        )
+    elif scheduler_name == "CyclicLR":
+        scheduler = torch.optim.lr_scheduler.CyclicLR(
+            optimizer,
+            base_lr=1e-4,
+            max_lr=1e-3,
+            mode="triangular",
+            cycle_momentum=False,
+            verbose=False,
+        )
+    elif scheduler_name == "CyclicLR2":
+        scheduler = torch.optim.lr_scheduler.CyclicLR(
+            optimizer,
+            base_lr=1e-4,
+            max_lr=1e-3,
+            mode="triangular2",
+            cycle_momentum=False,
+            verbose=False,
+        )
+    elif scheduler_name == "OneCycleLR":
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            epochs=config.epochs,
+            steps_per_epoch=len(dataloader),
+            max_lr=1e-3,
+            pct_start=0.2,
+            anneal_strategy="cos",
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer, gamma=0.5, verbose=True
+        )
+
+    return scheduler
+
+
 def train_loop(
     data_obj: data.Data,
     test_datafile_name: str,
@@ -74,7 +124,10 @@ def train_loop(
         )
 
     # create image transforms
-    transforms = data.get_transforms()
+    if type(model_class).__name__ in ["FeatureModel", "CNNModel"]:
+        transforms = None
+    else:
+        transforms = data.get_transforms()
 
     # create datasets
     train_dataset = data.ELMDataset(
@@ -138,25 +191,20 @@ def train_loop(
         cnn_feature_model.model_details(model, x, input_size)
 
     # optimizer
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
         amsgrad=False,
     )
 
-    # learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=2, verbose=True, eps=1e-6
+    # get the lr scheduler
+    scheduler = get_lr_scheduler(
+        optimizer, scheduler_name=config.scheduler, dataloader=train_loader
     )
 
     # loss function
-    if config.balance_classes:
-        criterion = nn.BCEWithLogitsLoss()
-    else:
-        criterion = nn.BCEWithLogitsLoss(
-            pos_weight=torch.tensor([13], device=device)
-        )
+    criterion = nn.BCEWithLogitsLoss(reduction="none")
 
     # define variables for ROC and loss
     best_score = 0
@@ -164,23 +212,51 @@ def train_loop(
 
     # instantiate training object
     engine = run.Run(
-        model, device=device, criterion=criterion, optimizer=optimizer
+        model,
+        device=device,
+        criterion=criterion,
+        optimizer=optimizer,
+        use_focal_loss=True,
     )
 
     # iterate through all the epochs
     for epoch in range(config.epochs):
         start_time = time.time()
 
-        # train
-        avg_loss = engine.train(train_loader, epoch, print_every=5000)
+        if config.scheduler in [
+            "CosineAnnealingLR",
+            "CyclicLR",
+            "CyclicLR2",
+            "OneCycleLR",
+        ]:
+            # train
+            avg_loss = engine.train(
+                train_loader, epoch, scheduler=scheduler, print_every=5000
+            )
 
-        # evaluate
-        avg_val_loss, preds, valid_labels = engine.evaluate(
-            valid_loader, print_every=2000
-        )
+            # evaluate
+            avg_val_loss, preds, valid_labels = engine.evaluate(
+                valid_loader, print_every=2000
+            )
+            scheduler = get_lr_scheduler(
+                optimizer,
+                scheduler_name=config.scheduler,
+                dataloader=train_loader,
+            )
+        else:
+            # train
+            avg_loss = engine.train(train_loader, epoch, print_every=5000)
 
-        # step the scheduler
-        scheduler.step(avg_val_loss)
+            # evaluate
+            avg_val_loss, preds, valid_labels = engine.evaluate(
+                valid_loader, print_every=2000
+            )
+
+            # step the scheduler
+            if config.scheduler == "ReduceLROnPlateau":
+                scheduler.step(avg_val_loss)
+            else:
+                scheduler.step()
 
         # scoring
         roc_score = roc_auc_score(valid_labels, preds)
@@ -229,6 +305,6 @@ if __name__ == "__main__":
     data_obj = data.Data(kfold=False, balance_classes=config.balance_classes)
     train_loop(
         data_obj,
-        model_class=model.StackedELMModel,
+        model_class=cnn_feature_model.FeatureModel,
         test_datafile_name=f"test_data_{config.data_mode}.pkl",
     )
